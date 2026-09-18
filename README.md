@@ -10,6 +10,7 @@
 - `images/`: 핵심 시각화 4개와 보너스 시각화 2개
 - `data/`: 원본·처리 데이터와 재현용 핵심 지표
 - `tests/`: 정제, 이동평균, 예측 데이터 누수 방지 테스트
+- `test-results/`: 마지막 검증 결과, JUnit XML, 전체 파이프라인 스모크 출력
 - `outputs/<ticker>/`: 사용자가 입력한 다른 종목의 데이터·그래프·리포트
 
 ## 분석 질문
@@ -70,6 +71,8 @@ python -m src.pipeline --skip-download
 ```bash
 pytest -q
 ```
+
+마지막으로 커밋된 테스트 결과는 [`test-results/TEST_RESULTS.md`](test-results/TEST_RESULTS.md)에서 확인할 수 있습니다. 문제가 생기면 당시 실행 환경과 현재 환경의 패키지 버전 및 스모크 출력부터 비교하세요.
 
 대시보드:
 
