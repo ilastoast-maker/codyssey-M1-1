@@ -4,18 +4,49 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
+from src.universal import UniversalSettings, download_yahoo_data, prepare_analysis_frame
 
-DATA_PATH = Path(__file__).parent / "data" / "processed" / "tsmc_features.csv"
 
-st.set_page_config(page_title="TSMC Trend Explorer", layout="wide")
-st.title("TSMC(2330.TW) 시계열 탐색 대시보드")
-st.caption("TWSE 공식 일별 거래 데이터 · 교육용 분석이며 투자 조언이 아닙니다.")
+ROOT = Path(__file__).parent
+DATA_PATH = ROOT / "data" / "processed" / "tsmc_features.csv"
 
-if not DATA_PATH.exists():
-    st.error("처리 데이터가 없습니다. 먼저 `python -m src.pipeline`을 실행하세요.")
+st.set_page_config(page_title="Stock Trend Explorer", layout="wide")
+st.title("주식 시계열 탐색 대시보드")
+st.caption("티커를 입력해 동일한 분석을 적용합니다. 교육용이며 투자 조언이 아닙니다.")
+
+
+@st.cache_data(ttl=3600, show_spinner="시장 데이터를 불러오는 중입니다...")
+def load_ticker(ticker: str) -> tuple[pd.DataFrame, str]:
+    ticker = ticker.strip().upper()
+    if ticker == "2330.TW" and DATA_PATH.exists():
+        return pd.read_csv(DATA_PATH, parse_dates=["Date"]), "TWSE 저장 데이터"
+    settings = UniversalSettings(ticker=ticker, name=ticker, provider="yahoo")
+    cached = ROOT / "outputs" / settings.slug / "data" / "processed" / "analysis.csv"
+    if cached.exists():
+        return pd.read_csv(cached, parse_dates=["Date"]), "저장된 분석 데이터"
+    raw = download_yahoo_data(settings)
+    featured, _ = prepare_analysis_frame(raw, settings)
+    return featured, "Yahoo Finance 실시간 다운로드"
+
+
+with st.sidebar:
+    st.header("종목")
+    if "active_ticker" not in st.session_state:
+        st.session_state.active_ticker = "2330.TW"
+    ticker_input = st.text_input("티커", value=st.session_state.active_ticker, help="예: 2330.TW, NVDA, AAPL, MSFT")
+    if st.button("종목 적용", use_container_width=True):
+        st.session_state.active_ticker = ticker_input.strip().upper()
+
+try:
+    df, data_source = load_ticker(st.session_state.active_ticker)
+except Exception as exc:
+    st.error(f"데이터를 불러오지 못했습니다: {exc}")
+    st.info("잠시 후 다시 시도하거나 CLI로 데이터를 먼저 저장한 뒤 대시보드를 실행하세요.")
     st.stop()
 
-df = pd.read_csv(DATA_PATH, parse_dates=["Date"])
+st.subheader(st.session_state.active_ticker)
+st.caption(f"데이터 경로: {data_source}")
+
 min_date, max_date = df["Date"].min().date(), df["Date"].max().date()
 
 with st.sidebar:
@@ -57,7 +88,7 @@ with tab1:
     ax.plot(view["Date"], view["Close"], label="Close", linewidth=1.2)
     ax.plot(view["Date"], view["Short_MA"], label=f"MA{short_window}")
     ax.plot(view["Date"], view["Long_MA"], label=f"MA{long_window}")
-    ax.set_ylabel("TWD")
+    ax.set_ylabel("Analysis price")
     ax.legend()
     st.pyplot(fig)
 
@@ -84,4 +115,3 @@ with tab3:
 
 st.markdown("### 해석 원칙")
 st.write("그래프에서 확인한 움직임은 관찰이며, 실적·AI 수요·금리·지정학적 사건은 별도 자료로 검증해야 할 원인 가설입니다.")
-

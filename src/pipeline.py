@@ -460,9 +460,29 @@ def run(skip_download: bool = False) -> dict[str, object]:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run the TSMC time-series analysis pipeline")
+    parser = argparse.ArgumentParser(description="Run the reusable stock time-series analysis pipeline")
     parser.add_argument("--skip-download", action="store_true", help="Reuse the checked-in raw CSV")
+    parser.add_argument("--ticker", help="Run the reusable pipeline for a ticker such as NVDA or AAPL")
+    parser.add_argument("--name", help="Company/display name; defaults to the ticker")
+    parser.add_argument("--provider", choices=["auto", "twse", "yahoo"], default="auto")
+    parser.add_argument("--start", default="2021-01-01")
+    parser.add_argument("--end", default="2025-12-31")
+    parser.add_argument("--currency", help="Optional graph currency label, e.g. USD")
     args = parser.parse_args()
-    output = run(skip_download=args.skip_download)
-    print(json.dumps(output, ensure_ascii=False, indent=2))
+    if args.ticker:
+        from src.universal import UniversalSettings, run_universal
 
+        output = run_universal(
+            UniversalSettings(
+                ticker=args.ticker,
+                name=args.name or args.ticker.upper(),
+                provider=args.provider,
+                start=args.start,
+                end=args.end,
+                currency=args.currency,
+            ),
+            skip_download=args.skip_download,
+        )
+    else:
+        output = run(skip_download=args.skip_download)
+    print(json.dumps(output, ensure_ascii=False, indent=2))

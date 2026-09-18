@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 
 from src.pipeline import Settings, add_features, forecast_baselines, validate_and_clean
+from src.universal import UniversalSettings, prepare_analysis_frame
 
 
 def sample_frame(rows: int = 140) -> pd.DataFrame:
@@ -39,3 +40,17 @@ def test_forecast_has_no_holdout_leakage():
     assert (forecast["Last_Value"] == training_last).all()
     assert metrics["Last_Value_MAE"] > 0
 
+
+def test_provider_auto_detection_and_safe_slug():
+    assert UniversalSettings("2330.TW", "TSMC").resolved_provider == "twse"
+    assert UniversalSettings("NVDA", "NVIDIA").resolved_provider == "yahoo"
+    assert UniversalSettings("BRK-B", "Berkshire Hathaway").slug == "brk_b"
+
+
+def test_adjusted_price_is_used_for_analysis():
+    raw = sample_frame()
+    raw["AnalysisPrice"] = raw["Close"] * 0.5
+    raw["PriceBasis"] = "Adjusted Close"
+    result, audit = prepare_analysis_frame(raw, UniversalSettings("AAPL", "Apple"))
+    assert result["Close"].iloc[-1] == raw["AnalysisPrice"].iloc[-1]
+    assert audit["price_basis"] == "Adjusted Close"
