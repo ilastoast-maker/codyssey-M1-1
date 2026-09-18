@@ -1,0 +1,55 @@
+{
+  "audit": {
+    "rows_after_cleaning": 1214,
+    "start_date": "2021-01-04",
+    "end_date": "2025-12-31",
+    "duplicate_dates_removed": 0,
+    "missing_before_cleaning": {
+      "Date": 0,
+      "Volume": 0,
+      "Turnover": 0,
+      "Open": 0,
+      "High": 0,
+      "Low": 0,
+      "Close": 0,
+      "Change": 0,
+      "Trades": 0
+    },
+    "invalid_ohlc_rows": 0,
+    "calendar_gaps_filled": 0
+  },
+  "start_close": 536.0,
+  "end_close": 1550.0,
+  "price_change_pct": 189.17910447761193,
+  "annualized_volatility_pct": 29.599251827574776,
+  "best_day": "2025-04-10",
+  "best_day_return_pct": 9.936305732484074,
+  "worst_day": "2025-04-07",
+  "worst_day_return_pct": -9.97876857749469,
+  "outlier_days": 48,
+  "volume_threshold": 60171311.40000002,
+  "high_volume_abs_return_pct": 2.991928282586903,
+  "normal_volume_abs_return_pct": 1.1677685657784846,
+  "regime_stats": {
+    "MA20 < MA60": {
+      "count": 414,
+      "mean_daily_return_pct": 0.061682426891202284,
+      "annualized_volatility_pct": 32.48361502314582
+    },
+    "MA20 >= MA60": {
+      "count": 741,
+      "mean_daily_return_pct": 0.117521399483338,
+      "annualized_volatility_pct": 27.634657029066258
+    }
+  },
+  "forecast": {
+    "Last_Value_MAE": 93.66666666666667,
+    "Last_Value_RMSE": 100.53191864610297,
+    "Last_Value_MAPE": 6.362711811430496,
+    "Drift_MAE": 72.34310494362532,
+    "Drift_RMSE": 80.22586852231083,
+    "Drift_MAPE": 4.906896822819908
+  },
+  "forecast_start": "2025-10-03",
+  "forecast_end": "2025-12-31"
+}
