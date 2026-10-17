@@ -15,6 +15,7 @@
       "Change": 0,
       "Trades": 0
     },
+    "missing_rows_removed": 0,
     "invalid_ohlc_rows": 0,
     "calendar_gaps_filled": 0,
     "analysis_price_rows_removed": 0,
@@ -29,6 +30,130 @@
   "worst_day": "2025-04-07",
   "worst_day_return_pct": -9.97876857749469,
   "outlier_days": 48,
+  "minimum_close": 371.0,
+  "minimum_close_date": "2022-10-25",
+  "maximum_close": 1550.0,
+  "maximum_close_date": "2025-12-31",
+  "regime_crossings": [
+    {
+      "date": "2021-06-18",
+      "regime": "MA20 >= MA60"
+    },
+    {
+      "date": "2021-08-10",
+      "regime": "MA20 < MA60"
+    },
+    {
+      "date": "2021-09-07",
+      "regime": "MA20 >= MA60"
+    },
+    {
+      "date": "2021-10-12",
+      "regime": "MA20 < MA60"
+    },
+    {
+      "date": "2021-11-09",
+      "regime": "MA20 >= MA60"
+    },
+    {
+      "date": "2022-03-07",
+      "regime": "MA20 < MA60"
+    },
+    {
+      "date": "2022-08-12",
+      "regime": "MA20 >= MA60"
+    },
+    {
+      "date": "2022-09-19",
+      "regime": "MA20 < MA60"
+    },
+    {
+      "date": "2022-11-25",
+      "regime": "MA20 >= MA60"
+    },
+    {
+      "date": "2023-04-25",
+      "regime": "MA20 < MA60"
+    },
+    {
+      "date": "2023-05-30",
+      "regime": "MA20 >= MA60"
+    },
+    {
+      "date": "2023-08-14",
+      "regime": "MA20 < MA60"
+    },
+    {
+      "date": "2023-11-06",
+      "regime": "MA20 >= MA60"
+    },
+    {
+      "date": "2024-08-16",
+      "regime": "MA20 < MA60"
+    },
+    {
+      "date": "2024-10-08",
+      "regime": "MA20 >= MA60"
+    },
+    {
+      "date": "2025-03-05",
+      "regime": "MA20 < MA60"
+    },
+    {
+      "date": "2025-05-22",
+      "regime": "MA20 >= MA60"
+    }
+  ],
+  "monthly_stats": {
+    "1": {
+      "mean_return_pct": 7.821545401058117,
+      "count": 4
+    },
+    "2": {
+      "mean_return_pct": -0.619617551254503,
+      "count": 5
+    },
+    "3": {
+      "mean_return_pct": 0.08191611065442288,
+      "count": 5
+    },
+    "4": {
+      "mean_return_pct": -2.4583889708056694,
+      "count": 5
+    },
+    "5": {
+      "mean_return_pct": 5.033289161330073,
+      "count": 5
+    },
+    "6": {
+      "mean_return_pct": 3.0339119892993205,
+      "count": 5
+    },
+    "7": {
+      "mean_return_pct": 1.72467506964503,
+      "count": 5
+    },
+    "8": {
+      "mean_return_pct": 0.6630039506209795,
+      "count": 5
+    },
+    "9": {
+      "mean_return_pct": -2.5663735256168563,
+      "count": 5
+    },
+    "10": {
+      "mean_return_pct": 3.571791998246032,
+      "count": 5
+    },
+    "11": {
+      "mean_return_pct": 5.686145585468607,
+      "count": 5
+    },
+    "12": {
+      "mean_return_pct": 2.612422221871462,
+      "count": 5
+    }
+  },
   "volume_threshold": 60171311.40000002,
   "high_volume_abs_return_pct": 2.991928282586903,
   "normal_volume_abs_return_pct": 1.1677685657784846,
@@ -54,7 +179,5 @@
   },
   "forecast_start": "2025-10-03",
   "forecast_end": "2025-12-31",
-  "ticker": "2330.TW",
-  "name": "TSMC",
-  "provider": "twse"
+  "data_source": "TWSE 저장 데이터"
 }

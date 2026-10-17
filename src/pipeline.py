@@ -114,18 +114,28 @@ def collect_twse_data(settings: Settings, output_path: Path = RAW_PATH) -> pd.Da
 
 
 def validate_and_clean(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, object]]:
+    required = {"Date", "Open", "High", "Low", "Close", "Volume"}
+    missing_columns = required.difference(frame.columns)
+    if missing_columns:
+        raise ValueError(f"Missing columns: {sorted(missing_columns)}")
     df = frame.copy()
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    for column in required - {"Date"}:
+        df[column] = pd.to_numeric(df[column], errors="coerce").replace([np.inf, -np.inf], np.nan)
     duplicate_count = int(df.duplicated("Date").sum())
     missing_before = {column: int(value) for column, value in df.isna().sum().items()}
-    df = df.dropna(subset=["Date", "Open", "High", "Low", "Close", "Volume"])
+    missing_rows = int(df[list(required)].isna().any(axis=1).sum())
+    df = df.dropna(subset=list(required))
     df = df.drop_duplicates("Date").sort_values("Date").reset_index(drop=True)
+    if df.empty:
+        raise ValueError("No valid observations in the selected period")
 
     invalid_price = (
         (df[["Open", "High", "Low", "Close"]] <= 0).any(axis=1)
         | (df["High"] < df["Low"])
         | (df["High"] < df[["Open", "Close"]].max(axis=1))
         | (df["Low"] > df[["Open", "Close"]].min(axis=1))
+        | (df["Volume"] < 0)
     )
     invalid_count = int(invalid_price.sum())
     if invalid_count:
@@ -137,6 +147,7 @@ def validate_and_clean(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, obj
         "end_date": df["Date"].max().strftime("%Y-%m-%d"),
         "duplicate_dates_removed": duplicate_count,
         "missing_before_cleaning": missing_before,
+        "missing_rows_removed": missing_rows,
         "invalid_ohlc_rows": invalid_count,
         "calendar_gaps_filled": 0,
     }
@@ -167,6 +178,8 @@ def add_features(frame: pd.DataFrame, settings: Settings) -> pd.DataFrame:
 
 
 def forecast_baselines(df: pd.DataFrame, horizon: int) -> tuple[pd.DataFrame, dict[str, float]]:
+    if horizon < 1:
+        raise ValueError("Holdout horizon must be positive")
     if len(df) <= horizon + 2:
         raise ValueError("Not enough observations for the requested holdout horizon")
     train = df.iloc[:-horizon].copy()
@@ -201,6 +214,10 @@ def calculate_metrics(df: pd.DataFrame, audit: dict[str, object], settings: Sett
         .fillna(0)
     )
     forecast_df, forecast_metrics = forecast_baselines(df, settings.forecast_horizon)
+    monthly = df.set_index("Date")["Close"].resample("ME").last().pct_change(fill_method=None).dropna() * 100
+    monthly_stats = monthly.groupby(monthly.index.month).agg(["mean", "count"])
+    regime = df.loc[df["Regime"] != "Insufficient history", ["Date", "Regime"]]
+    crossings = regime.loc[regime["Regime"].ne(regime["Regime"].shift())].iloc[1:]
 
     metrics: dict[str, object] = {
         "audit": audit,
@@ -213,6 +230,14 @@ def calculate_metrics(df: pd.DataFrame, audit: dict[str, object], settings: Sett
         "worst_day": df.loc[df["Daily_Return"].idxmin(), "Date"].strftime("%Y-%m-%d"),
         "worst_day_return_pct": float(returns.min() * 100),
         "outlier_days": int(df["Return_Outlier"].sum()),
+        "minimum_close": float(df["Close"].min()),
+        "minimum_close_date": df.loc[df["Close"].idxmin(), "Date"].strftime("%Y-%m-%d"),
+        "maximum_close": float(df["Close"].max()),
+        "maximum_close_date": df.loc[df["Close"].idxmax(), "Date"].strftime("%Y-%m-%d"),
+        "regime_crossings": [{"date": row.Date.strftime("%Y-%m-%d"), "regime": row.Regime}
+                             for row in crossings.itertuples()],
+        "monthly_stats": {str(month): {"mean_return_pct": float(row["mean"]), "count": int(row["count"])}
+                          for month, row in monthly_stats.iterrows()},
         "volume_threshold": volume_threshold,
         "high_volume_abs_return_pct": float(df.loc[high_volume, "Daily_Return"].abs().mean() * 100),
         "normal_volume_abs_return_pct": float(df.loc[~high_volume, "Daily_Return"].abs().mean() * 100),
@@ -281,11 +306,14 @@ def create_visualizations(df: pd.DataFrame, settings: Settings) -> None:
     _save_figure("04_monthly_return_heatmap.png")
 
     monthly_close = df.set_index("Date")["Close"].resample("ME").last().dropna()
-    decomposition = seasonal_decompose(monthly_close, model="additive", period=12, extrapolate_trend="freq")
-    fig = decomposition.plot()
-    fig.set_size_inches(13, 9)
-    fig.suptitle("Monthly Price Decomposition (Additive, Period=12)", y=1.01)
-    _save_figure("05_seasonal_decomposition.png")
+    if len(monthly_close) >= 24:
+        decomposition = seasonal_decompose(monthly_close, model="additive", period=12, extrapolate_trend="freq")
+        fig = decomposition.plot()
+        fig.set_size_inches(13, 9)
+        fig.suptitle("Monthly Price Decomposition (Additive, Period=12)", y=1.01)
+        _save_figure("05_seasonal_decomposition.png")
+    else:
+        (IMAGES_DIR / "05_seasonal_decomposition.png").unlink(missing_ok=True)
 
     forecast_df, _ = forecast_baselines(df, settings.forecast_horizon)
     history = df.iloc[-(settings.forecast_horizon + 120) : -settings.forecast_horizon]
@@ -310,8 +338,18 @@ def write_report(metrics: dict[str, object], settings: Settings) -> None:
     high = metrics["high_volume_abs_return_pct"]
     normal = metrics["normal_volume_abs_return_pct"]
     volume_ratio = high / normal if normal else float("nan")
+    missing_summary = ", ".join(f"{key}: {value}" for key, value in audit["missing_before_cleaning"].items())
+    monthly_table = "\n".join(f"| {month}월 | {value['count']} | {value['mean_return_pct']:.2f}% |"
+                              for month, value in metrics["monthly_stats"].items())
+    crossings_table = "\n".join(f"| {row['date']} | {row['regime']} |"
+                                for row in metrics["regime_crossings"][-6:])
+    decomposition_line = ("![계절 분해](images/05_seasonal_decomposition.png)"
+                          if (IMAGES_DIR / "05_seasonal_decomposition.png").exists()
+                          else "월말 관측치가 24개 미만이므로 연간 주기 분해를 생략했다.")
+    best_month = max(metrics["monthly_stats"], key=lambda key: metrics["monthly_stats"][key]["mean_return_pct"])
+    worst_month = min(metrics["monthly_stats"], key=lambda key: metrics["monthly_stats"][key]["mean_return_pct"])
 
-    report = f"""# TSMC 2021~2025년 주가 트렌드 분석 리포트
+    report = f"""# TSMC {settings.start}~{settings.end} 주가 트렌드 분석 리포트
 
 ## 1. 분석 주제 및 선정 이유
 
@@ -319,7 +357,7 @@ def write_report(metrics: dict[str, object], settings: Settings) -> None:
 
 ## 2. 분석 질문
 
-1. 2021~2025년에 장기 추세와 이동평균 기반 시장 국면은 어떻게 변했는가?
+1. 분석 기간에 장기 추세와 이동평균 기반 시장 국면은 어떻게 변했는가?
 2. MA20이 MA60 이상인 구간과 미만인 구간의 수익률·변동성은 어떻게 다른가?
 3. 가장 큰 급등·급락과 IQR 이상치는 언제였는가?
 4. 거래량 상위 10% 거래일의 절대수익률은 나머지 거래일보다 큰가?
@@ -336,6 +374,9 @@ def write_report(metrics: dict[str, object], settings: Settings) -> None:
 - 컬럼: 시가, 고가, 저가, 종가, 거래량, 거래대금, 전일 대비 변화, 거래 건수
 - 중복 날짜 제거: {audit['duplicate_dates_removed']}개
 - 잘못된 OHLC 행: {audit['invalid_ohlc_rows']}개
+- 정제 전 컬럼별 결측치(날짜·필수 수치 변환 실패 포함): {missing_summary}
+- 필수 컬럼 결측으로 제거한 행: {audit['missing_rows_removed']}개
+- 처리 기준: 날짜 또는 OHLC·거래량이 없거나 수치로 변환할 수 없는 행은 제거한다. 중복 날짜는 첫 행을 유지하며, 0 이하 가격·음수 거래량·고저가 논리 오류는 실행을 중단해 원본을 확인한다. 거래대금·전일 대비·거래 건수는 분석 필수값이 아니므로 누락만으로 제거하지 않는다.
 - 휴장일 보간: 하지 않음. 휴장일은 오류나 결측 관측치가 아니므로 인위적으로 채우지 않았다.
 - 이상치: 삭제하지 않고 IQR 기준으로 표시했다. 실제 시장 충격일 가능성이 있기 때문이다.
 
@@ -350,6 +391,10 @@ def write_report(metrics: dict[str, object], settings: Settings) -> None:
 - 거래량 상위 10%와 나머지 구간의 평균 절대수익률 비교
 - 월별 종가를 이용한 가법 계절 분해(주기 12개월)
 - 마지막 {settings.forecast_horizon}거래일 홀드아웃에 대한 마지막 값·드리프트 기준선 예측
+
+20·60거래일은 각각 약 1개월·3개월의 흐름을 비교하기 위한 교육용 설정이며 최적화한 매매 규칙이 아니다. 일별 수익률은 충격 탐지에, 월별 집계는 일간 노이즈를 줄이고 연도 간 같은 달을 비교하는 데 사용했다. MA20은 첫 19일, MA60은 첫 59일, 20일 수익률 변동성은 첫 20일에 계산 이력이 부족해 비어 있으며 원본 결측과 구분한다.
+
+추세는 장기간의 방향, 계절성은 일정 주기의 반복, 노이즈·잔차는 해당 추세와 주기로 설명되지 않는 움직임이다. 분해의 잔차가 순수한 무작위 잡음임을 검증한 것은 아니다. 252일 연율화는 비교용 관례이며 대만의 실제 연간 거래일 수와 다를 수 있다.
 
 ## 5. 시각화 및 결과
 
@@ -368,6 +413,20 @@ def write_report(metrics: dict[str, object], settings: Settings) -> None:
 ### 5.4 월별 수익률
 
 ![월별 수익률 히트맵](images/04_monthly_return_heatmap.png)
+
+첫 관측월의 전월말 가격이 없어 첫 달의 월간 수익률은 계산하지 않았다. 기간 경계의 월은 관측된 마지막 거래일까지의 값이다.
+
+| 월 | 월간 수익률 관측 수 | 평균 월간 수익률 |
+|---|---:|---:|
+{monthly_table}
+
+### 5.5 추세 변화의 위치
+
+기간 최저 종가는 {metrics['minimum_close_date']}의 {metrics['minimum_close']:,.2f} TWD, 최고 종가는 {metrics['maximum_close_date']}의 {metrics['maximum_close']:,.2f} TWD였다. 이동평균 국면 전환은 총 {len(metrics['regime_crossings'])}회였고 최근 최대 6개 전환은 다음과 같다. 이는 당일 종가가 반영된 후행적 구간 분류이며 실제 매매 수익률이 아니다.
+
+| 전환일 | 전환 후 국면 |
+|---|---|
+{crossings_table}
 
 ## 6. 인사이트
 
@@ -395,18 +454,26 @@ def write_report(metrics: dict[str, object], settings: Settings) -> None:
 - **해석(Hypothesis):** 거래 집중일에 정보 반영과 가격 재평가가 함께 나타났을 가능성이 있다. 그러나 동시 움직임은 거래량이 변동의 원인임을 뜻하지 않는다.
 - **행동(Action):** 상승일과 하락일을 분리하고 거래량 급증 전후 수익률을 비교한다.
 
+### 인사이트 5 — 월별 평균 차이와 계절성의 한계
+
+- **관찰(Fact):** 월별 평균 수익률은 {best_month}월 {metrics['monthly_stats'][best_month]['mean_return_pct']:.2f}%({metrics['monthly_stats'][best_month]['count']}회 관측)로 가장 높고, {worst_month}월 {metrics['monthly_stats'][worst_month]['mean_return_pct']:.2f}%({metrics['monthly_stats'][worst_month]['count']}회 관측)로 가장 낮았다. 월별 실제 값은 히트맵과 5.4의 표에 제시했다.
+- **해석(Hypothesis):** 특정 연도의 큰 움직임이 평균을 바꿀 수 있다. 적은 표본의 평균 차이만으로 반복적인 계절성을 확정할 수 없다.
+- **행동(Action):** 더 긴 기간에서 중앙값·양의 수익률 비율을 비교하고 별도 검증 구간에서도 반복되는지 확인한다.
+
 ## 7. 보너스 1 — 탐색형 대시보드
 
-`streamlit run app.py`로 실행한다. 날짜 범위, 단기·장기 이동평균, 변동성 창을 바꾸며 가격·수익률·위험·거래량을 탐색할 수 있다. 제출 시 로컬 실행 화면 녹화 또는 스크린샷 세트를 추가하면 된다.
+`streamlit run app.py`로 실행한다. 날짜 범위, 단기·장기 이동평균, 변동성 창을 바꾸며 가격·수익률·위험·거래량을 탐색할 수 있다. [스크린샷 세트와 필터 변경 시나리오](docs/DASHBOARD_DEMO.md)를 제출 증빙으로 포함한다.
 
 ## 8. 보너스 2 — 시계열 심화
 
 ### 8.1 월별 시계열 분해
 
-![계절 분해](images/05_seasonal_decomposition.png)
+{decomposition_line}
 
 - **관찰:** 월말 종가를 추세·12개월 계절 성분·잔차로 분해했다.
 - **한계:** 5년은 연간 계절성을 안정적으로 주장하기에 짧고, 주가는 고정된 계절성이 약한 비정상 시계열이다. 분해 결과는 탐색적 표현으로만 사용한다.
+
+월별 평균의 차이는 탐색적 관찰이다. 같은 달 표본이 수 회에 불과하고 연도별 수익률 부호도 달라질 수 있으므로, 이 자료만으로 특정 월의 우월성이나 반복적인 계절성을 확정하지 않는다. 더 긴 기간의 자료와 별도 검증 구간이 필요하다.
 
 ### 8.2 단순 기준선 예측
 
@@ -436,23 +503,23 @@ def write_report(metrics: dict[str, object], settings: Settings) -> None:
 | 예측 기준선 구현 | 누수 없는 비교 기준 마련 | 마지막 60일을 완전히 분리하고 MAE/RMSE/MAPE 재계산 |
 
 AI가 제안한 결과를 그대로 사실로 채택하지 않았으며, 수치 결과는 전체 파이프라인 재실행으로 검증했다.
+
+추가 검증에서는 AI가 작성한 캐시 기간 필터와 날짜 선택 처리를 수정하고, 회귀 테스트·대시보드 조작·재생성 수치 비교를 수행했다. 재현 절차와 실제 실행 결과는 [검증 기록](test-results/TEST_RESULTS.md)에 남겼다. 학습자는 제출 전 위 해석과 한계에 동의하는지 직접 검토해야 한다.
 """
     REPORT_PATH.write_text(report, encoding="utf-8")
 
 
-def run(skip_download: bool = False) -> dict[str, object]:
-    settings = Settings()
-    if skip_download:
-        if not RAW_PATH.exists():
-            raise FileNotFoundError(f"Raw data not found: {RAW_PATH}")
-        raw = pd.read_csv(RAW_PATH)
-    else:
-        raw = collect_twse_data(settings)
-    clean, audit = validate_and_clean(raw)
-    featured = add_features(clean, settings)
+def run(skip_download: bool = False, refresh: bool = False,
+        start: str = "2021-01-01", end: str = "2025-12-31") -> dict[str, object]:
+    from src.universal import UniversalSettings, load_market_data, prepare_analysis_frame
+    settings = Settings(start=start, end=end)
+    universal = UniversalSettings("2330.TW", "TSMC", start=start, end=end)
+    raw, source = load_market_data(universal, skip_download, refresh)
+    featured, audit = prepare_analysis_frame(raw, universal)
     PROCESSED_PATH.parent.mkdir(parents=True, exist_ok=True)
     featured.to_csv(PROCESSED_PATH, index=False, date_format="%Y-%m-%d")
     metrics = calculate_metrics(featured, audit, settings)
+    metrics["data_source"] = source
     METRICS_PATH.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     create_visualizations(featured, settings)
     write_report(metrics, settings)
@@ -462,6 +529,7 @@ def run(skip_download: bool = False) -> dict[str, object]:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the reusable stock time-series analysis pipeline")
     parser.add_argument("--skip-download", action="store_true", help="Reuse the checked-in raw CSV")
+    parser.add_argument("--refresh", action="store_true", help="Explicitly download fresh data instead of using cache")
     parser.add_argument("--ticker", help="Run the reusable pipeline for a ticker such as NVDA or AAPL")
     parser.add_argument("--name", help="Company/display name; defaults to the ticker")
     parser.add_argument("--provider", choices=["auto", "twse", "yahoo"], default="auto")
@@ -482,7 +550,8 @@ if __name__ == "__main__":
                 currency=args.currency,
             ),
             skip_download=args.skip_download,
+            refresh=args.refresh,
         )
     else:
-        output = run(skip_download=args.skip_download)
+        output = run(skip_download=args.skip_download, refresh=args.refresh, start=args.start, end=args.end)
     print(json.dumps(output, ensure_ascii=False, indent=2))
