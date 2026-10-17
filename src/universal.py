@@ -6,18 +6,22 @@ import json
 import math
 import re
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import numpy as np
 import pandas as pd
 import seaborn as sns
 import yfinance as yf
+from yfinance.exceptions import YFRateLimitError
 from statsmodels.tsa.seasonal import seasonal_decompose
 
 from src.pipeline import (
     ROOT,
+    RAW_PATH,
     Settings as TwseSettings,
     add_features,
     calculate_metrics,
@@ -41,6 +45,16 @@ class UniversalSettings:
     short_window: int = 20
     long_window: int = 60
     forecast_horizon: int = 60
+
+    def __post_init__(self) -> None:
+        if pd.Timestamp(self.start) > pd.Timestamp(self.end):
+            raise ValueError("start must be on or before end")
+        if not 1 <= self.short_window < self.long_window:
+            raise ValueError("Require 1 <= short_window < long_window")
+        if self.forecast_horizon < 1:
+            raise ValueError("forecast_horizon must be positive")
+        if not self.slug:
+            raise ValueError("Ticker must contain letters or numbers")
 
     @property
     def normalized_ticker(self) -> str:
@@ -77,6 +91,7 @@ def output_paths(settings: UniversalSettings) -> dict[str, Path]:
     base = settings.output_dir
     return {
         "raw": base / "data" / "raw" / "market_data.csv",
+        "source": base / "data" / "raw" / "source.json",
         "processed": base / "data" / "processed" / "analysis.csv",
         "metrics": base / "data" / "processed" / "metrics.json",
         "images": base / "images",
@@ -88,20 +103,21 @@ def download_yahoo_data(settings: UniversalSettings, retries: int = 3) -> pd.Dat
     last_error: Exception | None = None
     for attempt in range(retries):
         try:
-            frame = yf.download(
-                settings.normalized_ticker,
+            # history raises rate-limit errors, whereas download may swallow them
+            # and return an empty frame, hiding the reason from callers.
+            frame = yf.Ticker(settings.normalized_ticker).history(
                 start=settings.start,
                 end=(pd.Timestamp(settings.end) + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
                 auto_adjust=False,
                 actions=False,
-                progress=False,
-                threads=False,
                 timeout=30,
+                raise_errors=True,
             )
             if frame.empty:
                 raise RuntimeError("Yahoo Finance returned no rows")
             if isinstance(frame.columns, pd.MultiIndex):
                 frame.columns = frame.columns.get_level_values(0)
+            frame.index = pd.to_datetime(frame.index).tz_localize(None)
             frame = frame.reset_index().rename(columns={"index": "Date"})
             required = {"Date", "Open", "High", "Low", "Close", "Volume"}
             missing = required.difference(frame.columns)
@@ -110,9 +126,16 @@ def download_yahoo_data(settings: UniversalSettings, retries: int = 3) -> pd.Dat
             frame["AnalysisPrice"] = frame["Adj Close"] if "Adj Close" in frame else frame["Close"]
             frame["PriceBasis"] = "Adjusted Close" if "Adj Close" in frame else "Close"
             return frame
-        except Exception as exc:  # yfinance wraps network errors in several exception types
+        except YFRateLimitError as exc:
+            raise RuntimeError(
+                "Yahoo Finance 호출 제한(429)입니다. 연속 재요청을 중단했습니다. "
+                "저장된 CSV를 사용하거나 나중에 --refresh로 갱신하세요. "
+                "최초 수집에 성공한 캐시가 없으면 다른 종목/데이터 출처를 선택하세요."
+            ) from exc
+        except Exception as exc:  # transient connection failures only get bounded retries
             last_error = exc
-            time.sleep(2 * (attempt + 1))
+            if attempt + 1 < retries:
+                time.sleep(min(5 * 2**attempt, 30))
     raise RuntimeError(
         "Yahoo Finance download failed after retries. Reuse a cached CSV with --skip-download."
     ) from last_error
@@ -130,21 +153,75 @@ def collect_market_data(settings: UniversalSettings) -> pd.DataFrame:
         frame["PriceBasis"] = "Close"
     else:
         frame = download_yahoo_data(settings)
-        paths["raw"].parent.mkdir(parents=True, exist_ok=True)
-        frame.to_csv(paths["raw"], index=False, date_format="%Y-%m-%d")
+    # Keep both providers' price basis and requested coverage on disk.
+    paths["raw"].parent.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(paths["raw"], index=False, date_format="%Y-%m-%d")
+    paths["source"].write_text(json.dumps({
+        "ticker": settings.normalized_ticker, "provider": settings.resolved_provider,
+        "start": settings.start, "end": settings.end,
+        "collected_at_utc": datetime.now(timezone.utc).isoformat(),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
     return frame
 
 
+def load_market_data(
+    settings: UniversalSettings, skip_download: bool = False, refresh: bool = False,
+) -> tuple[pd.DataFrame, str]:
+    """Prefer disk cache; only refresh explicitly or collect a missing period."""
+    if skip_download and refresh:
+        raise ValueError("--skip-download and --refresh cannot be used together")
+    paths = output_paths(settings)
+    candidates = [(paths["raw"], paths["source"])]
+    if settings.normalized_ticker in {"2330", "2330.TW"} and settings.resolved_provider == "twse":
+        candidates.append((RAW_PATH, RAW_PATH.with_suffix(".source.json")))
+    for path, metadata_path in candidates:
+        if not path.exists() or refresh:
+            continue
+        raw = pd.read_csv(path)
+        dates = pd.to_datetime(raw["Date"], errors="coerce")
+        if metadata_path.exists():
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if metadata.get("provider") != settings.resolved_provider:
+                continue
+            start, end = pd.Timestamp(metadata["start"]), pd.Timestamp(metadata["end"])
+        elif path == RAW_PATH:
+            start, end = pd.Timestamp("2021-01-01"), pd.Timestamp("2025-12-31")
+        else:
+            # A legacy CSV has no record of requests on non-trading boundary days.
+            start, end = dates.min(), dates.max()
+        covers = start <= pd.Timestamp(settings.start) and end >= pd.Timestamp(settings.end)
+        if covers:
+            return raw, f"{settings.resolved_provider.upper()} 저장 데이터"
+    if skip_download:
+        raise FileNotFoundError(
+            "요청 기간과 제공자가 일치하는 원본 CSV 캐시가 없습니다. "
+            "최초 수집 또는 --refresh가 필요합니다."
+        )
+    return collect_market_data(settings), f"{settings.resolved_provider.upper()} 신규 수집·저장"
+
+
 def prepare_analysis_frame(raw: pd.DataFrame, settings: UniversalSettings) -> tuple[pd.DataFrame, dict[str, object]]:
-    clean, audit = validate_and_clean(raw)
+    raw = raw.copy()
+    raw["Date"] = pd.to_datetime(raw["Date"], errors="coerce")
+    requested = raw.loc[raw["Date"].between(pd.Timestamp(settings.start), pd.Timestamp(settings.end))]
+    clean, audit = validate_and_clean(requested)
     if "AnalysisPrice" not in clean:
         clean["AnalysisPrice"] = clean["Close"]
     clean["AnalysisPrice"] = pd.to_numeric(clean["AnalysisPrice"], errors="coerce")
+    clean = clean.replace({"AnalysisPrice": {np.inf: np.nan, -np.inf: np.nan}})
     missing_analysis_price = int(clean["AnalysisPrice"].isna().sum())
-    clean = clean.dropna(subset=["AnalysisPrice"]).copy()
+    clean = clean.dropna(subset=["AnalysisPrice"]).reset_index(drop=True)
+    if (clean["AnalysisPrice"] <= 0).any():
+        raise ValueError("Analysis prices must be positive")
+    minimum = max(100, settings.long_window + 1, settings.forecast_horizon + 3)
+    if len(clean) < minimum:
+        raise ValueError(f"선택 기간 정제 후 최소 {minimum}개 관측치가 필요합니다: {len(clean)}개")
     clean["MarketClose"] = clean["Close"]
     clean["Close"] = clean["AnalysisPrice"]
     audit["analysis_price_rows_removed"] = missing_analysis_price
+    audit.update(rows_after_cleaning=len(clean),
+                 start_date=clean["Date"].min().strftime("%Y-%m-%d"),
+                 end_date=clean["Date"].max().strftime("%Y-%m-%d"))
     audit["price_basis"] = (
         str(raw["PriceBasis"].dropna().iloc[0]) if "PriceBasis" in raw and not raw["PriceBasis"].dropna().empty else "Close"
     )
@@ -217,6 +294,8 @@ def create_generic_visualizations(df: pd.DataFrame, settings: UniversalSettings)
         fig.set_size_inches(13, 9)
         fig.suptitle(f"{settings.name} Monthly Decomposition", y=1.01)
         _save(images, "05_seasonal_decomposition.png")
+    else:
+        (images / "05_seasonal_decomposition.png").unlink(missing_ok=True)
 
     forecast_df, _ = forecast_baselines(df, settings.forecast_horizon)
     history = df.iloc[-(settings.forecast_horizon + 120) : -settings.forecast_horizon]
@@ -266,10 +345,18 @@ def write_generic_report(metrics: dict[str, object], settings: UniversalSettings
 - 실제 기간: {audit['start_date']} ~ {audit['end_date']}
 - 관측치: {audit['rows_after_cleaning']:,}개
 - 분석 가격: {audit['price_basis']}
+- 컬럼: 날짜, 시가, 고가, 저가, 종가, 거래량 및 제공자별 보조 컬럼
+- 정제 전 결측치: {json.dumps(audit['missing_before_cleaning'], ensure_ascii=False)}
+- 필수값 결측 제거: {audit['missing_rows_removed']}행, 분석가격 결측 제거: {audit['analysis_price_rows_removed']}행
+- 정제 기준: 날짜·OHLC·거래량 결측 행 제거, 날짜 정렬·중복 제거. 비양수 가격·음수 거래량·OHLC 논리 오류는 중단하여 확인한다.
 - 중복 제거: {audit['duplicate_dates_removed']}개
 - 잘못된 OHLC 행: {audit['invalid_ohlc_rows']}개
 - 휴장일: 보간하지 않음
 - 이상치: 삭제하지 않고 IQR 기준으로 표시
+
+출처: [TWSE STOCK_DAY](https://www.twse.com.tw/exchangeReport/STOCK_DAY) 또는 [Yahoo Finance](https://finance.yahoo.com/). 각 제공자의 데이터 이용 조건을 확인하고 출처를 표시한다.
+
+방법: {settings.short_window}·{settings.long_window}거래일 이동평균은 단기·중기 방향 비교, 일간 변화율은 충격 탐지, {settings.short_window}일 수익률 표준편차×√252는 변동성 비교에 사용했다. 월말 종가 변화율은 일간 노이즈를 줄인 연도별 비교에 썼다. 최초 월의 전월말 값은 없어 월간 수익률에서 제외한다. 국면별 통계는 당일 가격으로 분류한 관찰이며 매매전략의 성과가 아니다.
 
 ## 4. 핵심 시각화
 
@@ -342,14 +429,9 @@ def write_generic_report(metrics: dict[str, object], settings: UniversalSettings
     paths["report"].write_text(text, encoding="utf-8")
 
 
-def run_universal(settings: UniversalSettings, skip_download: bool = False) -> dict[str, object]:
+def run_universal(settings: UniversalSettings, skip_download: bool = False, refresh: bool = False) -> dict[str, object]:
     paths = output_paths(settings)
-    if skip_download:
-        if not paths["raw"].exists():
-            raise FileNotFoundError(f"Cached raw data not found: {paths['raw']}")
-        raw = pd.read_csv(paths["raw"])
-    else:
-        raw = collect_market_data(settings)
+    raw, source = load_market_data(settings, skip_download, refresh)
     features, audit = prepare_analysis_frame(raw, settings)
     paths["processed"].parent.mkdir(parents=True, exist_ok=True)
     features.to_csv(paths["processed"], index=False, date_format="%Y-%m-%d")
@@ -364,6 +446,7 @@ def run_universal(settings: UniversalSettings, skip_download: bool = False) -> d
     metrics["ticker"] = settings.normalized_ticker
     metrics["name"] = settings.name
     metrics["provider"] = settings.resolved_provider
+    metrics["data_source"] = source
     paths["metrics"].write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     create_generic_visualizations(features, settings)
     write_generic_report(metrics, settings)

@@ -1,0 +1,10 @@
+{
+  "app.py": "77afdc2a7e69d92133107dc285dc1e1568e024a04d22d66664c5992da5c0cc0f",
+  "src/pipeline.py": "69b3c08e038f6f73dbd0f0285e4b5f55eac9b315b19c3f62d3aa621e1f8199d8",
+  "src/universal.py": "af85302a1a0224d9efaef27bc5c74a488a6e2b2881c01bb45ebf6181a2995a5c",
+  "tests/test_pipeline.py": "76e25c1c541e267f386ef1957d2ed7247bd40554a456a77fac0f08dd95c41f0c",
+  "tests/test_dashboard.py": "b1aab083d52d412022d2b78a1f691526af2aca408ec871c66905ce0834a05da3",
+  "data/raw/tsmc_2330_tw_2021_2025.csv": "db16ae1d0ba918ef7037518de91504fe552faadb6cbfcf9140c0630c9cb565e4",
+  "REPORT.md": "c97950fba8f93355eb43044e8b82a7d8fc7ca5209598fe2e3f39b90f494ace21",
+  "requirements-lock.txt": "2c75510a6f9306210e5a4d69a56cbaa2718e252f5c9cfb627df2011fa96a221f"
+}
